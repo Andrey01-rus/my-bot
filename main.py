@@ -1,17 +1,10 @@
 from flask import Flask
 from threading import Thread
-
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "🤖 Бот активен!"
-
-Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
 import json
 import random
 import requests
 import os
+import vk_api
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -23,6 +16,15 @@ from telegram.ext import (
     filters
 )
 
+# Flask сервер для проверки активности
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "🤖 Бот активен!"
+
+Thread(target=lambda: app.run(host='0.0.0.0', port=8080)).start()
+
 # Константы состояний
 AI_CHAT = 1
 
@@ -33,23 +35,71 @@ with open('ideas.json', 'r', encoding='utf-8') as f:
 # Конфигурация
 TOKEN = os.environ["TOKEN"]
 OPENROUTER_KEY = os.environ["OPENROUTER_KEY"]
-MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1:free"  # DeepSeek-R1
+VK_TOKEN = os.environ.get("VK_TOKEN", "")  # Добавляем токен VK
+MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1:free"
 
-# Клавиатуры
+# Безопасные паблики VK (с разрешением на репост)
+SAFE_PUBLICS = [
+    -97216585,  # @video
+    -34317336,  # @tnt
+    -34017843,  # @lentach
+    -15755094,  # @oldlentach
+    -53827980   # @bratishkinoff
+]
+
+class VKParser:
+    def __init__(self):
+        self.vk = vk_api.VkApi(token=VK_TOKEN)
+
+    def get_safe_content(self, count=5):
+        """Возвращает безопасные медиафайлы из VK"""
+        result = []
+        for public_id in SAFE_PUBLICS:
+            try:
+                posts = self.vk.method("wall.get", {
+                    "owner_id": public_id,
+                    "count": 10,
+                    "filter": "owner"
+                })["items"]
+                
+                for post in posts:
+                    if len(result) >= count:
+                        break
+                    if "attachments" in post:
+                        for attach in post["attachments"]:
+                            if attach["type"] == "photo":
+                                photo = attach["photo"]
+                                url = max(photo["sizes"], key=lambda x: x["height"])["url"]
+                                result.append({"type": "photo", "url": url})
+                            elif attach["type"] == "video":
+                                video = attach["video"]
+                                if video.get("platform"):  # Только видео с платформ
+                                    result.append({"type": "video", "url": video["player"]})
+            except Exception as e:
+                print(f"Ошибка при парсинге паблика {public_id}: {e}")
+        return result[:count]
+
+# Инициализация парсера VK
+vk_parser = VKParser() if VK_TOKEN else None
+
+# Обновленная клавиатура
 def main_keyboard():
-    return InlineKeyboardMarkup([
+    buttons = [
         [InlineKeyboardButton("🎲 Идея", callback_data='idea'),
          InlineKeyboardButton("📍 Место", callback_data='place')],
         [InlineKeyboardButton("🕹 Игра", callback_data='game'),
          InlineKeyboardButton("🤖 ИИ-чат", callback_data='ai_chat')]
-    ])
+    ]
+    if vk_parser:
+        buttons.append([InlineKeyboardButton("🖼 Мемы (5 шт)", callback_data='memes')])
+    return InlineKeyboardMarkup(buttons)
 
 def ai_chat_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Выйти из ИИ-чата", callback_data='exit_ai')]
     ])
 
-# ИИ-функционал с фильтрацией
+# ИИ-функционал (оставляем ваш существующий код без изменений)
 async def ask_ai(prompt):
     try:
         messages = [
@@ -75,14 +125,13 @@ async def ask_ai(prompt):
             json={
                 "model": MODEL,
                 "messages": messages,
-                "temperature": 1.0  # Максимальная креативность
+                "temperature": 1.0
             },
             timeout=20
         )
 
         answer = response.json()['choices'][0]['message']['content']
 
-        # Фильтрация ответа
         filters = [
             "**Answer:**",
             "Thought Process:", 
@@ -100,18 +149,7 @@ async def ask_ai(prompt):
         print(f"Ошибка ИИ: {e}")
         return "⚠️ Произошла ошибка, попробуйте задать вопрос иначе"
 
-# Обработчики
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🚀 Привет! Я умный бот-помощник:\n"
-        "- Генератор идей\n"
-        "- Поиск мест\n"
-        "- Игры\n"
-        "- Продвинутый ИИ-чат",
-        reply_markup=main_keyboard()
-    )
-    return ConversationHandler.END
-
+# Обработчики (добавляем новый case для мемов)
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -126,6 +164,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ai_chat_keyboard()
         )
         return AI_CHAT
+    
+    elif query.data == 'memes' and vk_parser:
+        content = vk_parser.get_safe_content()
+        if not content:
+            await query.edit_message_text("😔 Мемы временно недоступны", reply_markup=main_keyboard())
+            return
+            
+        for item in content:
+            if item["type"] == "photo":
+                await query.message.reply_photo(photo=item["url"])
+            elif item["type"] == "video":
+                await query.message.reply_video(video=item["url"], supports_streaming=True)
+        
+        await query.message.reply_text("Вот свежие мемы! Что еще хотите?", reply_markup=main_keyboard())
+        return
 
     try:
         if query.data in ['idea', 'place', 'game']:
@@ -143,6 +196,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await query.edit_message_text("😕 Ошибка, попробуйте другой вариант", reply_markup=main_keyboard())
 
+    return ConversationHandler.END
+
+# Остальные обработчики остаются без изменений
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🚀 Привет! Я умный бот-помощник:\n"
+        "- Генератор идей\n"
+        "- Поиск мест\n"
+        "- Игры\n"
+        "- Продвинутый ИИ-чат" + 
+        ("\n- Свежие мемы" if vk_parser else ""),
+        reply_markup=main_keyboard()
+    )
     return ConversationHandler.END
 
 async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -163,7 +229,7 @@ async def exit_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-# Настройка ConversationHandler
+# Настройка ConversationHandler (без изменений)
 conv_handler = ConversationHandler(
     entry_points=[CallbackQueryHandler(button_handler, pattern='^ai_chat$')],
     states={
