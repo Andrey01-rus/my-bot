@@ -1,4 +1,22 @@
-from flask import Flask
+import os
+from telegram.ext import Updater
+
+# Добавьте эту проверку перед запуском бота
+if os.environ.get('RUNNING_IN_RENDER'):
+    # Настройки для Render
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(conv_handler)
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    print("🤖 Бот запущен в Render!")
+    app.run_polling(
+        drop_pending_updates=True,  # Важно: игнорирует старые сообщения при перезапуске
+        allowed_updates=Update.ALL_TYPES
+    )
+else:
+    # Локальная конфигурация (если нужно)
+    print("⚠️ Запускайте бота только на Render!")from flask import Flask
 from threading import Thread
 import json
 import random
