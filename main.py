@@ -1,10 +1,9 @@
 import os
 import json
 import random
-import requests
+import logging
 import socket
 import sys
-import logging
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -39,12 +38,19 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🤖 Бот активен и работает!"
+    return "🤖 Бот активен!"
 
 # --- Константы ---
 AI_CHAT = 1
-REDDIT_SUBREDDITS = ["memes", "dankmemes", "Pikabu"]
-MEME_CACHE = {"memes": [], "last_update": None}
+MEME_SOURCES = [
+    # Открытые API мемов
+    "https://meme-api.com/gimme",
+    # Альтернативные источники
+    "https://api.imgflip.com/get_memes",
+    # Резервные URL мемов
+    "https://i.imgur.com/example1.jpg",
+    "https://i.imgur.com/example2.jpg"
+]
 
 # --- Загрузка данных ---
 try:
@@ -63,9 +69,6 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     logger.error("Токен Telegram не найден!")
     sys.exit(1)
-
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
-MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1:free"
 
 # --- Клавиатуры ---
 def main_keyboard():
@@ -90,40 +93,25 @@ def meme_keyboard():
     ])
 
 # --- Функции мемов ---
-async def fetch_reddit_memes():
-    """Получаем мемы с Reddit через официальный API"""
-    global MEME_CACHE
-    
-    if MEME_CACHE["last_update"] and (datetime.now() - MEME_CACHE["last_update"]).seconds < 7200:
-        return MEME_CACHE["memes"]
-    
-    new_memes = []
-    for subreddit in REDDIT_SUBREDDITS:
-        try:
-            url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=10"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-            }
-            
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            
+async def get_random_meme():
+    """Получаем мем из случайного источника"""
+    try:
+        # Пробуем открытые API
+        response = requests.get(MEME_SOURCES[0], timeout=10)
+        if response.status_code == 200:
             data = response.json()
-            for post in data["data"]["children"]:
-                if post["data"].get("post_hint") == "image":
-                    new_memes.append({
-                        "url": post["data"]["url"],
-                        "source": f"https://reddit.com{post['data']['permalink']}",
-                        "title": post["data"]["title"]
-                    })
-        except Exception as e:
-            logger.error(f"Ошибка при получении мемов с r/{subreddit}: {str(e)[:100]}...")
-    
-    MEME_CACHE = {
-        "memes": new_memes[:20],
-        "last_update": datetime.now()
+            return {
+                "url": data["url"],
+                "source": data["postLink"]
+            }
+    except Exception as e:
+        logger.warning(f"API мемов недоступно: {e}")
+
+    # Если API не сработало, берем из резервных URL
+    return {
+        "url": random.choice(MEME_SOURCES[2:]),
+        "source": "Архив мемов"
     }
-    return MEME_CACHE["memes"]
 
 async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправка мема с обработкой ошибок"""
@@ -131,21 +119,16 @@ async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     try:
-        memes = await fetch_reddit_memes()
-        if not memes:
-            raise Exception("Нет доступных мемов")
-        
-        meme = random.choice(memes)
+        meme = await get_random_meme()
         await context.bot.send_photo(
             chat_id=query.message.chat_id,
             photo=meme["url"],
-            caption=f"<b>{meme['title']}</b>\n\n🔗 {meme['source']}",
-            reply_markup=meme_keyboard(),
-            parse_mode="HTML"
+            caption=f"🔗 {meme['source']}",
+            reply_markup=meme_keyboard()
         )
         await query.message.delete()
     except Exception as e:
-        logger.error(f"Ошибка при отправке мема: {e}")
+        logger.error(f"Ошибка отправки мема: {e}")
         await query.edit_message_text(
             "😢 Не удалось загрузить мем. Попробуйте позже!",
             reply_markup=main_keyboard()
@@ -156,7 +139,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 Добро пожаловать! Я бот с функциями:\n"
         "- Генератор идей\n- Поиск мест\n- Мини-игры\n"
-        "- Умный ИИ-чат\n- Свежие мемы с Reddit",
+        "- Случайные мемы",
         reply_markup=main_keyboard()
     )
     return ConversationHandler.END
@@ -167,10 +150,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == 'ai_chat':
         await query.edit_message_text(
-            "💬 Режим ИИ-чата. Задайте ваш вопрос:",
-            reply_markup=ai_chat_keyboard()
+            "💬 Режим ИИ-чата временно недоступен",
+            reply_markup=main_keyboard()
         )
-        return AI_CHAT
+        return ConversationHandler.END
 
     if query.data in ['idea', 'place', 'game']:
         response = random.choice(ideas[{
@@ -185,52 +168,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     return ConversationHandler.END
 
-async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        answer = await ask_ai(update.message.text)
-        await update.message.reply_text(f"🤖 {answer}", reply_markup=ai_chat_keyboard())
-    except Exception as e:
-        logger.error(f"Ошибка ИИ: {e}")
-        await update.message.reply_text("⚠️ Ошибка генерации ответа", reply_markup=ai_chat_keyboard())
-    return AI_CHAT
-
-async def exit_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("✅ Вы вышли из ИИ-чата", reply_markup=main_keyboard())
-    return ConversationHandler.END
-
-async def ask_ai(prompt):
-    """Улучшенный ИИ-чат с обработкой ошибок"""
-    try:
-        headers = {
-            "Authorization": f"Bearer {OPENROUTER_KEY}",
-            "HTTP-Referer": "https://github.com/AntiSkukaBot",
-            "X-Title": "AntiSkukaBot AI"
-        }
-        
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json={
-                "model": MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.7
-            },
-            timeout=20
-        )
-        response.raise_for_status()
-        return response.json()['choices'][0]['message']['content']
-    except Exception as e:
-        raise Exception(f"Ошибка API: {str(e)[:200]}")
-
 # --- Запуск приложения ---
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
-
-async def post_init(application: Application) -> None:
-    """Функция для инициализации"""
-    logger.info("✅ Бот успешно инициализирован")
 
 def main() -> None:
     """Запуск бота"""
@@ -238,37 +178,19 @@ def main() -> None:
     Thread(target=run_flask, daemon=True).start()
 
     # Инициализация бота
-    application = Application.builder().token(TOKEN).post_init(post_init).build()
+    application = Application.builder().token(TOKEN).build()
 
     # Обработчики
     application.add_handler(CommandHandler('start', start))
-    
-    conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(button_handler, pattern='^ai_chat$')],
-        states={
-            AI_CHAT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, ai_chat_mode),
-                CallbackQueryHandler(exit_ai_chat, pattern='^exit_ai$')
-            ]
-        },
-        fallbacks=[CommandHandler('start', start)],
-        per_message=True
-    )
-    
-    application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(CallbackQueryHandler(send_random_meme, pattern='^(get_meme|more_memes)$'))
 
+    # Удаляем старые обновления при запуске
+    application.drop_pending_updates = True
+
     # Запуск
-    logger.info("🟢 Запускаю бота с параметрами:")
-    logger.info(f"- Модель: {MODEL}")
-    logger.info(f"- Сабреддиты: {', '.join(REDDIT_SUBREDDITS)}")
-    
-    application.run_polling(
-        drop_pending_updates=True,
-        close_loop=False,
-        stop_signals=[]
-    )
+    logger.info("🟢 Запускаю бота...")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
