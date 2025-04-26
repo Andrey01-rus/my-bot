@@ -2,8 +2,6 @@ import os
 import json
 import random
 import logging
-import requests
-from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -24,12 +22,6 @@ logger = logging.getLogger(__name__)
 
 # --- Константы ---
 AI_CHAT = 1
-IMGUR_API_URL = "https://api.imgur.com/3/gallery/search/top/week?q=meme"
-DEFAULT_MEMES = [
-    "https://i.imgur.com/8J7nD7B.jpg",
-    "https://i.imgur.com/5Z4w1Qq.jpg",
-    "https://i.imgur.com/3JQ2X9Y.jpg"
-]
 
 # --- Загрузка данных ---
 with open('ideas.json', 'r', encoding='utf-8') as f:
@@ -42,83 +34,24 @@ MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1:free"
 
 # --- Клавиатуры ---
 def main_keyboard():
-    buttons = [
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🎲 Идея", callback_data='idea'),
          InlineKeyboardButton("📍 Место", callback_data='place')],
         [InlineKeyboardButton("🕹 Игра", callback_data='game'),
-         InlineKeyboardButton("🤖 ИИ-чат", callback_data='ai_chat')],
-        [InlineKeyboardButton("🖼 Случайный мем", callback_data='get_meme')]
-    ]
-    return InlineKeyboardMarkup(buttons)
+         InlineKeyboardButton("🤖 ИИ-чат", callback_data='ai_chat')]
+    ])
 
 def ai_chat_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("❌ Выйти из ИИ-чата", callback_data='exit_ai')]
     ])
 
-def meme_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🎲 Ещё мем", callback_data='more_memes')],
-        [InlineKeyboardButton("🔙 Назад", callback_data='back')]
-    ])
-
-# --- Функции мемов ---
-def get_imgur_memes():
-    """Получаем топ мемов с Imgur"""
-    try:
-        headers = {'Authorization': 'Client-ID 546c25a59c58ad7'}  # Публичный ключ
-        response = requests.get(IMGUR_API_URL, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        memes = []
-        for item in response.json()['data']:
-            if 'images' in item and not item.get('nsfw', True):
-                for image in item['images']:
-                    if image['type'].startswith('image/'):
-                        memes.append({
-                            "url": image['link'],
-                            "source": f"https://imgur.com/gallery/{item['id']}",
-                            "title": item['title'] if 'title' in item else "Мем с Imgur"
-                        })
-        return memes[:50]  # Лимит 50 мемов
-    except Exception as e:
-        logger.error(f"Ошибка Imgur API: {e}")
-        return []
-
-async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Отправка мема с обработкой ошибок"""
-    query = update.callback_query
-    await query.answer()
-    
-    try:
-        memes = get_imgur_memes() or [{
-            "url": url,
-            "source": "Резервный мем",
-            "title": "Классический мем"
-        } for url in DEFAULT_MEMES]
-        
-        meme = random.choice(memes)
-        await context.bot.send_photo(
-            chat_id=query.message.chat_id,
-            photo=meme["url"],
-            caption=f"<b>{meme['title']}</b>\n\n🔗 {meme['source']}",
-            reply_markup=meme_keyboard(),
-            parse_mode="HTML"
-        )
-        await query.message.delete()
-    except Exception as e:
-        logger.error(f"Ошибка отправки мема: {e}")
-        await query.edit_message_text(
-            "😢 Не удалось загрузить мем. Попробуйте позже!",
-            reply_markup=main_keyboard()
-        )
-
-# --- Основные функции бота ---
+# --- Основные функции ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🚀 Добро пожаловать! Я бот с функциями:\n"
         "- Генератор идей\n- Поиск мест\n- Мини-игры\n"
-        "- Умный ИИ-чат\n- Свежие мемы",
+        "- Умный ИИ-чат",
         reply_markup=main_keyboard()
     )
     return ConversationHandler.END
@@ -142,9 +75,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }[query.data]])
         await query.edit_message_text(f"🎯 {response}", reply_markup=main_keyboard())
     
-    if query.data == 'back':
-        await query.edit_message_text("Главное меню:", reply_markup=main_keyboard())
-    
     return ConversationHandler.END
 
 async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -164,6 +94,9 @@ async def exit_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_ai(prompt):
     """Функция ИИ-чата"""
+    if not OPENROUTER_KEY:
+        return "⚠️ ИИ-чат недоступен (не настроен API-ключ)"
+    
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_KEY}",
@@ -206,9 +139,8 @@ def main():
     
     application.add_handler(conv_handler)
     application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(CallbackQueryHandler(send_random_meme, pattern='^(get_meme|more_memes)$'))
 
-    logger.info("Бот успешно запущен!")
+    logger.info("Бот успешно запущен (без мемов)")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == '__main__':
