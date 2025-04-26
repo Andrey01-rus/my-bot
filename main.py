@@ -4,7 +4,7 @@ import random
 import requests
 import socket
 import sys
-import asyncio
+import logging
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -19,12 +19,19 @@ from telegram.ext import (
     filters
 )
 
+# --- Настройка логов ---
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # --- Блокировка дублирующихся процессов ---
 try:
     lock_socket = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
     lock_socket.bind('\0' + 'antiskuka_bot_lock')
 except socket.error:
-    print("⚠️ Бот уже запущен! Завершаю процесс.")
+    logger.error("Бот уже запущен! Завершаю процесс.")
     sys.exit(1)
 
 # --- Инициализация Flask ---
@@ -40,11 +47,23 @@ REDDIT_SUBREDDITS = ["memes", "dankmemes", "Pikabu"]
 MEME_CACHE = {"memes": [], "last_update": None}
 
 # --- Загрузка данных ---
-with open('ideas.json', 'r', encoding='utf-8') as f:
-    ideas = json.load(f)
+try:
+    with open('ideas.json', 'r', encoding='utf-8') as f:
+        ideas = json.load(f)
+except Exception as e:
+    logger.error(f"Ошибка загрузки ideas.json: {e}")
+    ideas = {
+        "activities": ["Идея 1", "Идея 2"],
+        "places": ["Место 1", "Место 2"],
+        "games": ["Игра 1", "Игра 2"]
+    }
 
 # --- Конфигурация ---
 TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    logger.error("Токен Telegram не найден!")
+    sys.exit(1)
+
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1:free"
 
@@ -81,8 +100,10 @@ async def fetch_reddit_memes():
     new_memes = []
     for subreddit in REDDIT_SUBREDDITS:
         try:
-            url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=15"
-            headers = {"User-Agent": "TelegramBot/1.0"}
+            url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=10"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            }
             
             response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
@@ -96,7 +117,7 @@ async def fetch_reddit_memes():
                         "title": post["data"]["title"]
                     })
         except Exception as e:
-            print(f"Ошибка при получении мемов с r/{subreddit}: {str(e)[:100]}...")
+            logger.error(f"Ошибка при получении мемов с r/{subreddit}: {str(e)[:100]}...")
     
     MEME_CACHE = {
         "memes": new_memes[:20],
@@ -124,7 +145,7 @@ async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.message.delete()
     except Exception as e:
-        print(f"Ошибка при отправке мема: {e}")
+        logger.error(f"Ошибка при отправке мема: {e}")
         await query.edit_message_text(
             "😢 Не удалось загрузить мем. Попробуйте позже!",
             reply_markup=main_keyboard()
@@ -169,7 +190,7 @@ async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = await ask_ai(update.message.text)
         await update.message.reply_text(f"🤖 {answer}", reply_markup=ai_chat_keyboard())
     except Exception as e:
-        print(f"Ошибка ИИ: {e}")
+        logger.error(f"Ошибка ИИ: {e}")
         await update.message.reply_text("⚠️ Ошибка генерации ответа", reply_markup=ai_chat_keyboard())
     return AI_CHAT
 
@@ -209,7 +230,7 @@ def run_flask():
 
 async def post_init(application: Application) -> None:
     """Функция для инициализации"""
-    print("✅ Бот успешно инициализирован")
+    logger.info("✅ Бот успешно инициализирован")
 
 def main() -> None:
     """Запуск бота"""
@@ -230,7 +251,8 @@ def main() -> None:
                 CallbackQueryHandler(exit_ai_chat, pattern='^exit_ai$')
             ]
         },
-        fallbacks=[CommandHandler('start', start)]
+        fallbacks=[CommandHandler('start', start)],
+        per_message=True
     )
     
     application.add_handler(conv_handler)
@@ -238,9 +260,9 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(send_random_meme, pattern='^(get_meme|more_memes)$'))
 
     # Запуск
-    print("🟢 Запускаю бота с параметрами:")
-    print(f"- Модель: {MODEL}")
-    print(f"- Сабреддиты: {', '.join(REDDIT_SUBREDDITS)}")
+    logger.info("🟢 Запускаю бота с параметрами:")
+    logger.info(f"- Модель: {MODEL}")
+    logger.info(f"- Сабреддиты: {', '.join(REDDIT_SUBREDDITS)}")
     
     application.run_polling(
         drop_pending_updates=True,
