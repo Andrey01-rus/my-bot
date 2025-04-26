@@ -4,6 +4,7 @@ import random
 import requests
 import socket
 import sys
+import asyncio
 from datetime import datetime
 from threading import Thread
 from flask import Flask
@@ -35,7 +36,7 @@ def home():
 
 # --- Константы ---
 AI_CHAT = 1
-REDDIT_SUBREDDITS = ["memes", "dankmemes", "Pikabu", "Memes_Of_The_Dank"]
+REDDIT_SUBREDDITS = ["memes", "dankmemes", "Pikabu"]
 MEME_CACHE = {"memes": [], "last_update": None}
 
 # --- Загрузка данных ---
@@ -46,7 +47,6 @@ with open('ideas.json', 'r', encoding='utf-8') as f:
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1:free"
-PROXY_URL = os.getenv("PROXY_URL")  # Например: "http://gate.smartproxy.com:7000"
 
 # --- Клавиатуры ---
 def main_keyboard():
@@ -72,7 +72,7 @@ def meme_keyboard():
 
 # --- Функции мемов ---
 async def fetch_reddit_memes():
-    """Улучшенный парсер мемов с Reddit с кешированием"""
+    """Получаем мемы с Reddit через официальный API"""
     global MEME_CACHE
     
     if MEME_CACHE["last_update"] and (datetime.now() - MEME_CACHE["last_update"]).seconds < 7200:
@@ -81,49 +81,38 @@ async def fetch_reddit_memes():
     new_memes = []
     for subreddit in REDDIT_SUBREDDITS:
         try:
-            url = f"https://www.reddit.com/r/{subreddit}/top.json?limit=15&t=day"
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json"
-            }
-            proxies = {"http": PROXY_URL, "https": PROXY_URL} if PROXY_URL else None
+            url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit=15"
+            headers = {"User-Agent": "TelegramBot/1.0"}
             
-            response = requests.get(url, headers=headers, proxies=proxies, timeout=15)
+            response = requests.get(url, headers=headers, timeout=15)
             response.raise_for_status()
             
-            for post in response.json().get("data", {}).get("children", []):
-                data = post.get("data", {})
-                if data.get("post_hint") == "image" and not data.get("over_18", False):
+            data = response.json()
+            for post in data["data"]["children"]:
+                if post["data"].get("post_hint") == "image":
                     new_memes.append({
-                        "url": data["url"],
-                        "source": f"https://reddit.com{data['permalink']}",
-                        "title": data["title"]
+                        "url": post["data"]["url"],
+                        "source": f"https://reddit.com{post['data']['permalink']}",
+                        "title": post["data"]["title"]
                     })
         except Exception as e:
-            print(f"🚨 Ошибка в r/{subreddit}: {str(e)[:200]}")
+            print(f"Ошибка при получении мемов с r/{subreddit}: {str(e)[:100]}...")
     
     MEME_CACHE = {
-        "memes": [m for m in new_memes[:30] if await is_valid_url(m["url"])],
+        "memes": new_memes[:20],
         "last_update": datetime.now()
     }
     return MEME_CACHE["memes"]
 
-async def is_valid_url(url):
-    """Проверка доступности изображения"""
-    try:
-        return requests.head(url, timeout=5).status_code == 200
-    except:
-        return False
-
 async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Улучшенная отправка мемов с обработкой ошибок"""
+    """Отправка мема с обработкой ошибок"""
     query = update.callback_query
     await query.answer()
     
     try:
         memes = await fetch_reddit_memes()
         if not memes:
-            raise ValueError("Нет доступных мемов")
+            raise Exception("Нет доступных мемов")
         
         meme = random.choice(memes)
         await context.bot.send_photo(
@@ -135,7 +124,7 @@ async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await query.message.delete()
     except Exception as e:
-        print(f"🚨 Ошибка отправки мема: {e}")
+        print(f"Ошибка при отправке мема: {e}")
         await query.edit_message_text(
             "😢 Не удалось загрузить мем. Попробуйте позже!",
             reply_markup=main_keyboard()
@@ -180,7 +169,7 @@ async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = await ask_ai(update.message.text)
         await update.message.reply_text(f"🤖 {answer}", reply_markup=ai_chat_keyboard())
     except Exception as e:
-        print(f"🚨 Ошибка ИИ: {e}")
+        print(f"Ошибка ИИ: {e}")
         await update.message.reply_text("⚠️ Ошибка генерации ответа", reply_markup=ai_chat_keyboard())
     return AI_CHAT
 
@@ -218,18 +207,20 @@ async def ask_ai(prompt):
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
-if __name__ == '__main__':
+async def post_init(application: Application) -> None:
+    """Функция для инициализации"""
+    print("✅ Бот успешно инициализирован")
+
+def main() -> None:
+    """Запуск бота"""
     # Запуск Flask
     Thread(target=run_flask, daemon=True).start()
 
     # Инициализация бота
-    bot_app = Application.builder() \
-        .token(TOKEN) \
-        .post_init(lambda _: print("✅ Бот инициализирован")) \
-        .build()
+    application = Application.builder().token(TOKEN).post_init(post_init).build()
 
     # Обработчики
-    bot_app.add_handler(CommandHandler('start', start))
+    application.add_handler(CommandHandler('start', start))
     
     conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern='^ai_chat$')],
@@ -242,18 +233,20 @@ if __name__ == '__main__':
         fallbacks=[CommandHandler('start', start)]
     )
     
-    bot_app.add_handler(conv_handler)
-    bot_app.add_handler(CallbackQueryHandler(button_handler))
-    bot_app.add_handler(CallbackQueryHandler(send_random_meme, pattern='^(get_meme|more_memes)$'))
+    application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CallbackQueryHandler(send_random_meme, pattern='^(get_meme|more_memes)$'))
 
     # Запуск
     print("🟢 Запускаю бота с параметрами:")
     print(f"- Модель: {MODEL}")
     print(f"- Сабреддиты: {', '.join(REDDIT_SUBREDDITS)}")
-    print(f"- Прокси: {'Есть' if PROXY_URL else 'Нет'}")
     
-    bot_app.run_polling(
+    application.run_polling(
         drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        close_loop=False
+        close_loop=False,
+        stop_signals=[]
     )
+
+if __name__ == '__main__':
+    main()
