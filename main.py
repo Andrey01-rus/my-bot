@@ -4,7 +4,8 @@ import random
 import logging
 import requests
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.constants import ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -14,6 +15,7 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
+from telegram.error import NetworkError
 
 # --- Настройка логов ---
 logging.basicConfig(
