@@ -110,15 +110,12 @@ async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправка мема с обработкой ошибок"""
     query = update.callback_query
     try:
-        # Немедленное подтверждение callback
         await query.answer()
         
-        # Проверка возраста запроса
         if (datetime.now() - query.message.date).total_seconds() > 60:
             await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
             return
 
-        # Уведомление о начале загрузки
         await context.bot.send_chat_action(
             chat_id=query.message.chat_id, 
             action=ChatAction.UPLOAD_PHOTO
@@ -155,10 +152,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
-        # Немедленное подтверждение callback
         await query.answer()
         
-        # Проверка возраста запроса
         if (datetime.now() - query.message.date).total_seconds() > 60:
             await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
             return ConversationHandler.END
@@ -189,7 +184,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Уведомление о начале обработки
         await context.bot.send_chat_action(
             chat_id=update.message.chat_id,
             action=ChatAction.TYPING
@@ -225,7 +219,7 @@ async def ask_ai(prompt):
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7
             },
-            timeout=15  # Уменьшенный таймаут
+            timeout=15
         )
         response.raise_for_status()
         return response.json()['choices'][0]['message']['content']
@@ -249,7 +243,8 @@ def main():
                 CallbackQueryHandler(exit_ai_chat, pattern='^exit_ai$')
             ]
         },
-        fallbacks=[CommandHandler('start', start)]
+        fallbacks=[CommandHandler('start', start)],
+        per_message=True  # Добавлено для устранения предупреждения
     )
     
     application.add_handler(conv_handler)
@@ -259,16 +254,13 @@ def main():
     logger.info("Бот успешно запущен!")
     
     try:
+        # Упрощенный run_polling без лишних параметров
         application.run_polling(
             drop_pending_updates=True,
-            poll_interval=0.5,
-            timeout=20,
-            read_timeout=20,
-            connect_timeout=20
+            poll_interval=1.0
         )
     except NetworkError as e:
         logger.error(f"Network error: {e}")
-        # Логика переподключения
     except Exception as e:
         logger.error(f"Critical error: {e}")
 
