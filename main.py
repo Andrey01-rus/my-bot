@@ -15,7 +15,7 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
-from telegram.error import Conflict, NetworkError
+from telegram.error import Conflict, NetworkError, BadRequest
 
 # --- Настройка логов ---
 logging.basicConfig(
@@ -32,6 +32,7 @@ DEFAULT_MEMES = [
     "https://i.imgur.com/5Z4w1Qq.jpg",
     "https://i.imgur.com/3JQ2X9Y.jpg"
 ]
+CALLBACK_TIMEOUT = 25  # 25 секунд вместо 30 (запас)
 
 # --- Глобальные переменные ---
 MEME_CACHE = []
@@ -74,7 +75,7 @@ async def update_meme_cache():
     global MEME_CACHE, LAST_CACHE_UPDATE
     try:
         headers = {'Authorization': 'Client-ID 546c25a59c58ad7'}
-        response = requests.get(IMGUR_API_URL, headers=headers, timeout=10)
+        response = requests.get(IMGUR_API_URL, headers=headers, timeout=5)  # Уменьшен таймаут
         response.raise_for_status()
         
         MEME_CACHE = []
@@ -88,7 +89,7 @@ async def update_meme_cache():
                             "title": item['title'] if 'title' in item else "Мем с Imgur"
                         })
         LAST_CACHE_UPDATE = datetime.now(timezone.utc)
-        return MEME_CACHE[:50]
+        return MEME_CACHE[:20]  # Уменьшил лимит для скорости
     except Exception as e:
         logger.error(f"Ошибка Imgur API: {e}")
         return []
@@ -110,23 +111,27 @@ async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправка мема с обработкой ошибок"""
     query = update.callback_query
     try:
+        # Немедленное подтверждение получения callback
         await query.answer()
         
-        # Проверка возраста запроса с учетом временной зоны
+        # Быстрая проверка возраста запроса
         message_time = query.message.date.replace(tzinfo=timezone.utc)
         current_time = datetime.now(timezone.utc)
-        if (current_time - message_time).total_seconds() > 60:
-            await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
+        if (current_time - message_time).total_seconds() > CALLBACK_TIMEOUT:
+            await query.edit_message_text("⚠️ Время ответа истекло. Попробуйте снова.")
             return
 
+        # Быстрое уведомление о начале загрузки
         await context.bot.send_chat_action(
             chat_id=query.message.chat_id, 
             action=ChatAction.UPLOAD_PHOTO
         )
         
+        # Получаем мемы (кешированные или дефолтные)
         memes = await get_fresh_memes()
         meme = random.choice(memes)
         
+        # Отправляем мем
         await context.bot.send_photo(
             chat_id=query.message.chat_id,
             photo=meme["url"],
@@ -134,13 +139,22 @@ async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=meme_keyboard(),
             parse_mode="HTML"
         )
-        await query.message.delete()
+        
+        # Пытаемся удалить старое сообщение (не критично, если не получится)
+        try:
+            await query.message.delete()
+        except BadRequest:
+            pass
+            
     except Exception as e:
         logger.error(f"Ошибка отправки мема: {e}")
-        await query.edit_message_text(
-            "😢 Не удалось загрузить мем. Попробуйте позже!",
-            reply_markup=main_keyboard()
-        )
+        try:
+            await query.edit_message_text(
+                "😢 Не удалось загрузить мем. Попробуйте позже!",
+                reply_markup=main_keyboard()
+            )
+        except BadRequest:
+            pass
 
 # --- Основные функции бота ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -155,13 +169,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     try:
+        # Немедленное подтверждение получения callback
         await query.answer()
         
-        # Проверка возраста запроса с учетом временной зоны
+        # Быстрая проверка возраста запроса
         message_time = query.message.date.replace(tzinfo=timezone.utc)
         current_time = datetime.now(timezone.utc)
-        if (current_time - message_time).total_seconds() > 60:
-            await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
+        if (current_time - message_time).total_seconds() > CALLBACK_TIMEOUT:
+            await query.edit_message_text("⚠️ Время ответа истекло. Попробуйте снова.")
             return ConversationHandler.END
 
         if query.data == 'ai_chat':
@@ -185,7 +200,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Ошибка в button_handler: {e}")
-        await query.edit_message_text("⚠️ Произошла ошибка. Попробуйте снова.")
+        try:
+            await query.edit_message_text("⚠️ Произошла ошибка. Попробуйте снова.")
+        except BadRequest:
+            pass
         return ConversationHandler.END
 
 async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -225,7 +243,7 @@ async def ask_ai(prompt):
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7
             },
-            timeout=15
+            timeout=10  # Уменьшенный таймаут
         )
         response.raise_for_status()
         return response.json()['choices'][0]['message']['content']
@@ -263,7 +281,8 @@ def main():
         application.run_polling(
             drop_pending_updates=True,
             close_loop=False,
-            allowed_updates=Update.ALL_TYPES
+            allowed_updates=Update.ALL_TYPES,
+            poll_interval=0.5
         )
     except Conflict:
         logger.warning("Обнаружен конфликт: другой экземпляр бота уже запущен. Завершаю работу.")
