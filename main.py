@@ -4,7 +4,7 @@ import random
 import logging
 import requests
 from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ChatAction
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -30,6 +30,10 @@ DEFAULT_MEMES = [
     "https://i.imgur.com/5Z4w1Qq.jpg",
     "https://i.imgur.com/3JQ2X9Y.jpg"
 ]
+
+# --- Глобальные переменные ---
+MEME_CACHE = []
+LAST_CACHE_UPDATE = None
 
 # --- Загрузка данных ---
 with open('ideas.json', 'r', encoding='utf-8') as f:
@@ -63,41 +67,64 @@ def meme_keyboard():
     ])
 
 # --- Функции мемов ---
-def get_imgur_memes():
-    """Получаем топ мемов с Imgur"""
+async def update_meme_cache():
+    """Обновление кеша мемов"""
+    global MEME_CACHE, LAST_CACHE_UPDATE
     try:
-        headers = {'Authorization': 'Client-ID 546c25a59c58ad7'}  # Публичный ключ
+        headers = {'Authorization': 'Client-ID 546c25a59c58ad7'}
         response = requests.get(IMGUR_API_URL, headers=headers, timeout=10)
         response.raise_for_status()
         
-        memes = []
+        MEME_CACHE = []
         for item in response.json()['data']:
             if 'images' in item and not item.get('nsfw', True):
                 for image in item['images']:
                     if image['type'].startswith('image/'):
-                        memes.append({
+                        MEME_CACHE.append({
                             "url": image['link'],
                             "source": f"https://imgur.com/gallery/{item['id']}",
                             "title": item['title'] if 'title' in item else "Мем с Imgur"
                         })
-        return memes[:50]  # Лимит 50 мемов
+        LAST_CACHE_UPDATE = datetime.now()
+        return MEME_CACHE[:50]
     except Exception as e:
         logger.error(f"Ошибка Imgur API: {e}")
         return []
 
+async def get_fresh_memes():
+    """Получение свежих мемов с кешированием"""
+    global MEME_CACHE, LAST_CACHE_UPDATE
+    
+    if not MEME_CACHE or (datetime.now() - LAST_CACHE_UPDATE).total_seconds() > 3600:
+        await update_meme_cache()
+    
+    return MEME_CACHE or [{
+        "url": url,
+        "source": "Резервный мем",
+        "title": "Классический мем"
+    } for url in DEFAULT_MEMES]
+
 async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отправка мема с обработкой ошибок"""
     query = update.callback_query
-    await query.answer()
-    
     try:
-        memes = get_imgur_memes() or [{
-            "url": url,
-            "source": "Резервный мем",
-            "title": "Классический мем"
-        } for url in DEFAULT_MEMES]
+        # Немедленное подтверждение callback
+        await query.answer()
         
+        # Проверка возраста запроса
+        if (datetime.now() - query.message.date).total_seconds() > 60:
+            await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
+            return
+
+        # Уведомление о начале загрузки
+        await context.bot.send_chat_action(
+            chat_id=query.message.chat_id, 
+            action=ChatAction.UPLOAD_PHOTO
+        )
+        
+        memes = await get_fresh_memes()
         meme = random.choice(memes)
+        
         await context.bot.send_photo(
             chat_id=query.message.chat_id,
             photo=meme["url"],
@@ -125,30 +152,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        # Немедленное подтверждение callback
+        await query.answer()
+        
+        # Проверка возраста запроса
+        if (datetime.now() - query.message.date).total_seconds() > 60:
+            await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
+            return ConversationHandler.END
 
-    if query.data == 'ai_chat':
-        await query.edit_message_text(
-            "💬 Режим ИИ-чата. Задайте ваш вопрос:",
-            reply_markup=ai_chat_keyboard()
-        )
-        return AI_CHAT
+        if query.data == 'ai_chat':
+            await query.edit_message_text(
+                "💬 Режим ИИ-чата. Задайте ваш вопрос:",
+                reply_markup=ai_chat_keyboard()
+            )
+            return AI_CHAT
 
-    if query.data in ['idea', 'place', 'game']:
-        response = random.choice(ideas[{
-            'idea': 'activities',
-            'place': 'places',
-            'game': 'games'
-        }[query.data]])
-        await query.edit_message_text(f"🎯 {response}", reply_markup=main_keyboard())
-    
-    if query.data == 'back':
-        await query.edit_message_text("Главное меню:", reply_markup=main_keyboard())
-    
-    return ConversationHandler.END
+        if query.data in ['idea', 'place', 'game']:
+            response = random.choice(ideas[{
+                'idea': 'activities',
+                'place': 'places',
+                'game': 'games'
+            }[query.data]])
+            await query.edit_message_text(f"🎯 {response}", reply_markup=main_keyboard())
+        
+        if query.data == 'back':
+            await query.edit_message_text("Главное меню:", reply_markup=main_keyboard())
+        
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Ошибка в button_handler: {e}")
+        await query.edit_message_text("⚠️ Произошла ошибка. Попробуйте снова.")
+        return ConversationHandler.END
 
 async def ai_chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
+        # Уведомление о начале обработки
+        await context.bot.send_chat_action(
+            chat_id=update.message.chat_id,
+            action=ChatAction.TYPING
+        )
+        
         answer = await ask_ai(update.message.text)
         await update.message.reply_text(f"🤖 {answer}", reply_markup=ai_chat_keyboard())
     except Exception as e:
@@ -163,7 +207,7 @@ async def exit_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def ask_ai(prompt):
-    """Функция ИИ-чата"""
+    """Функция ИИ-чата с обработкой таймаутов"""
     try:
         headers = {
             "Authorization": f"Bearer {OPENROUTER_KEY}",
@@ -179,10 +223,12 @@ async def ask_ai(prompt):
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.7
             },
-            timeout=20
+            timeout=15  # Уменьшенный таймаут
         )
         response.raise_for_status()
         return response.json()['choices'][0]['message']['content']
+    except requests.exceptions.Timeout:
+        return "Извините, ИИ не ответил вовремя. Попробуйте позже."
     except Exception as e:
         raise Exception(f"Ошибка API: {str(e)[:200]}")
 
@@ -209,9 +255,20 @@ def main():
     application.add_handler(CallbackQueryHandler(send_random_meme, pattern='^(get_meme|more_memes)$'))
 
     logger.info("Бот успешно запущен!")
-    application.run_polling(drop_pending_updates=True)
+    
+    try:
+        application.run_polling(
+            drop_pending_updates=True,
+            poll_interval=0.5,
+            timeout=20,
+            read_timeout=20,
+            connect_timeout=20
+        )
+    except NetworkError as e:
+        logger.error(f"Network error: {e}")
+        # Логика переподключения
+    except Exception as e:
+        logger.error(f"Critical error: {e}")
 
 if __name__ == '__main__':
     main()
-    import requests
-response = requests.get(url, timeout=10)  # Макс 10 секунд на запрос
