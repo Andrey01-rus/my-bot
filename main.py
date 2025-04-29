@@ -3,7 +3,7 @@ import json
 import random
 import logging
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
 from telegram.ext import (
@@ -15,7 +15,7 @@ from telegram.ext import (
     MessageHandler,
     filters
 )
-from telegram.error import NetworkError
+from telegram.error import Conflict, NetworkError
 
 # --- Настройка логов ---
 logging.basicConfig(
@@ -87,7 +87,7 @@ async def update_meme_cache():
                             "source": f"https://imgur.com/gallery/{item['id']}",
                             "title": item['title'] if 'title' in item else "Мем с Imgur"
                         })
-        LAST_CACHE_UPDATE = datetime.now()
+        LAST_CACHE_UPDATE = datetime.now(timezone.utc)
         return MEME_CACHE[:50]
     except Exception as e:
         logger.error(f"Ошибка Imgur API: {e}")
@@ -97,7 +97,7 @@ async def get_fresh_memes():
     """Получение свежих мемов с кешированием"""
     global MEME_CACHE, LAST_CACHE_UPDATE
     
-    if not MEME_CACHE or (datetime.now() - LAST_CACHE_UPDATE).total_seconds() > 3600:
+    if not MEME_CACHE or (datetime.now(timezone.utc) - LAST_CACHE_UPDATE).total_seconds() > 3600:
         await update_meme_cache()
     
     return MEME_CACHE or [{
@@ -112,7 +112,10 @@ async def send_random_meme(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await query.answer()
         
-        if (datetime.now() - query.message.date).total_seconds() > 60:
+        # Проверка возраста запроса с учетом временной зоны
+        message_time = query.message.date.replace(tzinfo=timezone.utc)
+        current_time = datetime.now(timezone.utc)
+        if (current_time - message_time).total_seconds() > 60:
             await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
             return
 
@@ -154,7 +157,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await query.answer()
         
-        if (datetime.now() - query.message.date).total_seconds() > 60:
+        # Проверка возраста запроса с учетом временной зоны
+        message_time = query.message.date.replace(tzinfo=timezone.utc)
+        current_time = datetime.now(timezone.utc)
+        if (current_time - message_time).total_seconds() > 60:
             await query.edit_message_text("⚠️ Сообщение устарело. Нажмите кнопку снова.")
             return ConversationHandler.END
 
@@ -244,7 +250,7 @@ def main():
             ]
         },
         fallbacks=[CommandHandler('start', start)],
-        per_message=True  # Добавлено для устранения предупреждения
+        per_message=True
     )
     
     application.add_handler(conv_handler)
@@ -254,15 +260,19 @@ def main():
     logger.info("Бот успешно запущен!")
     
     try:
-        # Упрощенный run_polling без лишних параметров
         application.run_polling(
             drop_pending_updates=True,
-            poll_interval=1.0
+            close_loop=False,
+            allowed_updates=Update.ALL_TYPES
         )
+    except Conflict:
+        logger.warning("Обнаружен конфликт: другой экземпляр бота уже запущен. Завершаю работу.")
     except NetworkError as e:
-        logger.error(f"Network error: {e}")
+        logger.error(f"Ошибка сети: {e}")
     except Exception as e:
-        logger.error(f"Critical error: {e}")
+        logger.error(f"Критическая ошибка: {e}")
+    finally:
+        logger.info("Бот завершил работу")
 
 if __name__ == '__main__':
     main()
