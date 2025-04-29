@@ -194,3 +194,5 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+    import requests
+response = requests.get(url, timeout=10)  # Макс 10 секунд на запрос
